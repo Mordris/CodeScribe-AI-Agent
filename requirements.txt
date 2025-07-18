@@ -1,0 +1,8 @@
+# requirements.txt
+
+fastapi[all]
+redis>=4.0.0
+python-dotenv
+githubkit
+python-dotenv
+redis>=4.0.0
