@@ -20,19 +20,19 @@ from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_openai import ChatOpenAI
 
 # --- Configuration ---
-dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
-load_dotenv(dotenv_path=dotenv_path)
+load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - WORKER - %(levelname)s - %(message)s')
+
 APP_ID = os.getenv("APP_ID")
 BOT_NAME = "codescribe-mordris[bot]"
 PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-JOB_QUEUE_NAME = os.getenv("JOB_QUEUE_NAME", "pr_review_jobs")
+REDIS_HOST = os.getenv("REDIS_HOST")
+REDIS_PORT = int(os.getenv("REDIS_PORT"))
+JOB_QUEUE_NAME = os.getenv("JOB_QUEUE_NAME")
 REPLY_QUEUE_NAME = "pr_reply_jobs"
-CHROMA_HOST = "localhost"
-CHROMA_PORT = "8000"
+CHROMA_HOST = os.getenv("CHROMA_HOST")
+CHROMA_PORT = int(os.getenv("CHROMA_PORT"))
 CHROMA_COLLECTION_NAME = "codescribe_rules"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
@@ -59,17 +59,18 @@ def get_review_chain():
     llm_with_tools = llm.bind_tools([CodeSuggestion])
     template = """
     You are an expert code reviewer AI named CodeScribe.
-    Your analysis must be based on the following internal coding standards.
+    Your analysis MUST be based *only* on the following internal coding standards.
+    These standards OVERRIDE any general knowledge you have.
+
+    **CRITICAL INSTRUCTION:** The user has defined specific rules for variables, constants, and classes. You must follow these rules exactly as written. For example, a module-level assignment like `MyVar = 10` should be treated as a VARIABLE and follow the `snake_case` rule, NOT the constant rule.
 
     **Internal Standards:**
     {context}
 
     ---
-
+    
     **Pull Request Details:**
-    Review the following pull request based *only* on the standards provided above.
-    For each violation you find, you MUST call the `CodeSuggestion` tool with a description of the issue and the corrected code.
-    If you find multiple violations, call the tool multiple times.
+    Review the following pull request. For each violation of the **Internal Standards** provided above, you MUST call the `CodeSuggestion` tool.
 
     **PR Title:** {pr_title}
     **PR Description:** {pr_description}

@@ -1,9 +1,15 @@
 import logging
 import chromadb # Import the chromadb client library
+import os
+from dotenv import load_dotenv
+
 from langchain_community.document_loaders import DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+
+# Load environment variables from our local config file
+load_dotenv(dotenv_path=".env.local")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - INGEST - %(levelname)s - %(message)s')
@@ -11,8 +17,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - INGEST - %(levelna
 # --- Configuration ---
 KNOWLEDGE_BASE_PATH = "./knowledge_base"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-CHROMA_HOST = "localhost"
-CHROMA_PORT = "8000"
+# Read from environment variables, defaulting to localhost for safety
+CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
+CHROMA_PORT = os.getenv("CHROMA_PORT", "8000")
 CHROMA_COLLECTION_NAME = "codescribe_rules"
 
 def main():

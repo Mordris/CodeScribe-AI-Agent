@@ -1,0 +1,59 @@
+version: "3.8"
+
+services:
+  # The Redis service for caching and queuing
+  redis:
+    image: "redis:alpine"
+    container_name: codescribe-redis-compose
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: always
+
+  # The ChromaDB vector database service
+  chroma:
+    image: "chromadb/chroma:0.5.0"
+    container_name: codescribe-chroma-compose
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/.chroma/
+    restart: always
+
+  # The FastAPI ingestion service
+  ingestion_service:
+    container_name: codescribe-ingestion-service
+    build:
+      # CONTEXT is now the project root
+      context: .
+      # We now specify WHERE the Dockerfile is, relative to the context
+      dockerfile: ./ingestion_service/Dockerfile
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env.docker
+    depends_on:
+      - redis
+    restart: on-failure
+
+  # The Python worker service
+  worker:
+    container_name: codescribe-worker
+    build:
+      # CONTEXT is also the project root
+      context: .
+      # We specify the path to its Dockerfile
+      dockerfile: ./worker/Dockerfile
+    env_file:
+      - .env.docker
+    depends_on:
+      - redis
+      - chroma
+    restart: on-failure
+    tty: true
+    stdin_open: true
+
+volumes:
+  redis_data:
+  chroma_data:

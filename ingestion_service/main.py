@@ -9,17 +9,15 @@ from fastapi import FastAPI, Request, Header, HTTPException, status
 from dotenv import load_dotenv
 
 # --- Configuration ---
-dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
-load_dotenv(dotenv_path=dotenv_path)
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - INGESTION - %(levelname)s - %(message)s')
 
 GITHUB_WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-JOB_QUEUE_NAME = os.getenv("JOB_QUEUE_NAME", "pr_review_jobs")
+REDIS_HOST = os.getenv("REDIS_HOST")
+REDIS_PORT = int(os.getenv("REDIS_PORT"))
+JOB_QUEUE_NAME = os.getenv("JOB_QUEUE_NAME")
 REPLY_QUEUE_NAME = "pr_reply_jobs"
-
 
 # --- Application Setup ---
 app = FastAPI()
