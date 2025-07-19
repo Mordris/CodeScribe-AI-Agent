@@ -3,7 +3,7 @@ import json
 import logging
 import time
 import ast
-import base64 # Import the standard base64 library
+import base64
 
 import redis
 import openai
@@ -15,36 +15,33 @@ from githubkit.auth import AppInstallationAuthStrategy
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers.openai_tools import PydanticToolsParser
 from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_openai import ChatOpenAI
 
-
-# --- Configuration and Validation (remains the same) ---
+# --- Configuration ---
 dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(dotenv_path=dotenv_path)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - WORKER - %(levelname)s - %(message)s')
 APP_ID = os.getenv("APP_ID")
+BOT_NAME = "codescribe-mordris[bot]"
 PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 JOB_QUEUE_NAME = os.getenv("JOB_QUEUE_NAME", "pr_review_jobs")
+REPLY_QUEUE_NAME = "pr_reply_jobs"
 CHROMA_HOST = "localhost"
 CHROMA_PORT = "8000"
 CHROMA_COLLECTION_NAME = "codescribe_rules"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-if not all([APP_ID, PRIVATE_KEY_PATH, OPENAI_API_KEY]):
-    exit(1)
+
+# --- Setup, Validation, and other functions ---
+if not all([APP_ID, PRIVATE_KEY_PATH, OPENAI_API_KEY]): exit(1)
 try:
-    with open(PRIVATE_KEY_PATH, 'r') as f:
-        PRIVATE_KEY = f.read()
-except FileNotFoundError:
-    exit(1)
+    with open(PRIVATE_KEY_PATH, 'r') as f: PRIVATE_KEY = f.read()
+except FileNotFoundError: exit(1)
 
-
-# --- GitHub, Tool, and AI Chain Setup (remains the same) ---
 def get_installation_client(installation_id: int) -> GitHub:
     auth_strategy = AppInstallationAuthStrategy(app_id=APP_ID, private_key=PRIVATE_KEY, installation_id=installation_id)
     return GitHub(auth_strategy)
@@ -96,99 +93,128 @@ def get_review_chain():
     )
     return chain
 
-# --- NEW: AST Processing Function ---
 def analyze_python_file_with_ast(file_content: str):
-    """Parses a Python file's content into an AST and logs it."""
     logging.info("--- Starting AST Analysis ---")
     try:
-        # 1. Parse the file content into an AST
         tree = ast.parse(file_content)
         logging.info("Successfully parsed file into an AST.")
-        
-        # 2. Log the AST structure for inspection
         logging.info(f"AST Dump:\n{ast.dump(tree, indent=4)}")
-
-        # 3. Unparse the AST back into source code
         reconstructed_code = ast.unparse(tree)
-        logging.info("Successfully unparsed AST back to source code.")
         logging.info(f"Reconstructed Code:\n---\n{reconstructed_code}\n---")
-        
-    except SyntaxError as e:
-        logging.error(f"Could not parse file due to a syntax error: {e}")
     except Exception as e:
-        logging.error(f"An unexpected error occurred during AST analysis: {e}", exc_info=True)
+        logging.error(f"An error occurred during AST analysis: {e}", exc_info=True)
     logging.info("--- Finished AST Analysis ---")
+
+
+# --- Handler Functions ---
+
+def handle_pr_review(job_data: dict, review_chain, github_client: GitHub):
+    """Handles the entire process of a new PR review."""
+    repo_full_name = job_data["repo_full_name"]
+    pr_number = job_data["pr_number"]
+    owner, repo = repo_full_name.split('/')
+
+    # --- FULL LOGIC IS NOW CORRECTLY PLACED HERE ---
+    
+    # 1. Perform AST Analysis on any Python files
+    files_in_pr_response = github_client.rest.pulls.list_files(owner=owner, repo=repo, pull_number=pr_number)
+    pr_details = github_client.rest.pulls.get(owner=owner, repo=repo, pull_number=pr_number).parsed_data
+    head_branch_ref = pr_details.head.ref
+    for file in files_in_pr_response.parsed_data:
+        if file.filename.endswith(".py"):
+            logging.info(f"Found Python file: {file.filename}")
+            content_response = github_client.rest.repos.get_content(owner=owner, repo=repo, path=file.filename, ref=head_branch_ref)
+            base64_content = content_response.parsed_data.content
+            decoded_bytes = base64.b64decode(base64_content)
+            file_content = decoded_bytes.decode('utf-8')
+            analyze_python_file_with_ast(file_content)
+
+    # 2. Perform the RAG-based review
+    logging.info("Proceeding with RAG review process...")
+    diff_response = github_client.rest.pulls.get(owner=owner, repo=repo, pull_number=pr_number, headers={"Accept": "application/vnd.github.v3.diff"})
+    pr_diff = diff_response.content.decode('utf-8')
+    pr_title = pr_details.title
+    pr_body = pr_details.body or ""
+    
+    suggestions = review_chain.invoke({"diff": pr_diff, "pr_title": pr_title, "pr_description": pr_body})
+    
+    if not suggestions:
+        review_body = "Great work! I analyzed the code and it adheres to all our project's coding standards."
+    else:
+        comment_parts = ["I've identified the following areas for improvement based on our coding standards:"]
+        for i, suggestion in enumerate(suggestions):
+            comment_parts.append(f"\n**{i+1}. {suggestion.description}**\n")
+            comment_parts.append(f"```suggestion\n{suggestion.suggestion}\n```")
+        review_body = "\n".join(comment_parts)
+    
+    github_client.rest.issues.create_comment(owner=owner, repo=repo, issue_number=pr_number, body=review_body)
+    logging.info(f"Successfully posted structured review on PR #{pr_number}")
+
+
+def handle_comment_reply(job_data: dict, github_client: GitHub):
+    """Handles a reply to one of the bot's comments."""
+    repo_full_name, pr_number, commenter_login = job_data["repo_full_name"], job_data["pr_number"], job_data["commenter_login"]
+    owner, repo = repo_full_name.split('/')
+    
+    comments_response = github_client.rest.issues.list_comments(owner=owner, repo=repo, issue_number=pr_number)
+    conversation_history = [f"User '{c.user.login}' said:\n{c.body}" for c in comments_response.parsed_data]
+    conversation_text = "\n\n---\n\n".join(conversation_history)
+
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
+    prompt = f"""
+    You are an expert AI code reviewer named CodeScribe. A developer has replied to you.
+    Provide a helpful, concise response based on the entire conversation.
+
+    **Full Conversation History:**
+    {conversation_text}
+
+    ---
+    The last comment was from '{commenter_login}'. Your job is to reply to this. What is your response?
+    """
+
+    logging.info("Invoking LLM for a conversational reply...")
+    response = llm.invoke(prompt)
+    reply_body = response.content
+
+    github_client.rest.issues.create_comment(owner=owner, repo=repo, issue_number=pr_number, body=reply_body)
+    logging.info(f"Successfully posted conversational reply to PR #{pr_number}")
 
 
 # --- Main Worker Logic ---
 def process_jobs():
-    logging.info("Worker started with AST support. Waiting for jobs...")
+    logging.info("Worker started with Chat support. Listening to multiple queues...")
     review_chain = get_review_chain()
     
     try:
         redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
         redis_client.ping()
         logging.info(f"Successfully connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
-    except redis.exceptions.ConnectionError as e:
-        return
+    except redis.exceptions.ConnectionError as e: return
 
+    queues = [JOB_QUEUE_NAME, REPLY_QUEUE_NAME]
     while True:
         try:
-            _, job_json = redis_client.brpop(JOB_QUEUE_NAME, timeout=0)
+            queue_name_bytes, job_json = redis_client.brpop(queues, timeout=0)
+            queue_name = queue_name_bytes.decode('utf-8')
             job_data = json.loads(job_json)
-            logging.info(f"Processing AST job: {job_data}")
-            
-            repo_full_name, pr_number, installation_id = job_data["repo_full_name"], job_data["pr_number"], job_data["installation_id"]
-            owner, repo = repo_full_name.split('/')
-            
-            github_client = get_installation_client(installation_id)
-            
-            files_in_pr_response = github_client.rest.pulls.list_files(owner=owner, repo=repo, pull_number=pr_number)
-            for file in files_in_pr_response.parsed_data:
-                if file.filename.endswith(".py"):
-                    logging.info(f"Found Python file: {file.filename}")
-                    
-                    pr_details = github_client.rest.pulls.get(owner=owner, repo=repo, pull_number=pr_number).parsed_data
-                    head_branch_ref = pr_details.head.ref
-                    
-                    content_response = github_client.rest.repos.get_content(
-                        owner=owner,
-                        repo=repo,
-                        path=file.filename,
-                        ref=head_branch_ref
-                    )
-                    # CORRECTED LINE: Access .content and use the base64 library
-                    base64_content = content_response.parsed_data.content
-                    decoded_bytes = base64.b64decode(base64_content)
-                    file_content = decoded_bytes.decode('utf-8')
-                    
-                    analyze_python_file_with_ast(file_content)
 
-            logging.info("Proceeding with standard review process...")
-            diff_response = github_client.rest.pulls.get(owner=owner, repo=repo, pull_number=pr_number, headers={"Accept": "application/vnd.github.v3.diff"})
-            pr_diff = diff_response.content.decode('utf-8')
-            pr_details_response = github_client.rest.pulls.get(owner=owner, repo=repo, pull_number=pr_number)
-            pr_title = pr_details_response.parsed_data.title
-            pr_body = pr_details_response.parsed_data.body or ""
+            github_client = get_installation_client(job_data["installation_id"])
             
-            suggestions = review_chain.invoke({"diff": pr_diff, "pr_title": pr_title, "pr_description": pr_body})
+            if queue_name == JOB_QUEUE_NAME:
+                logging.info(f"Processing PR Review job from '{queue_name}'")
+                handle_pr_review(job_data, review_chain, github_client)
             
-            if not suggestions:
-                review_body = "Great work! I analyzed the code and it adheres to all our project's coding standards."
-            else:
-                comment_parts = ["I've identified the following areas for improvement based on our coding standards:"]
-                for i, suggestion in enumerate(suggestions):
-                    comment_parts.append(f"\n**{i+1}. {suggestion.description}**\n")
-                    comment_parts.append(f"```suggestion\n{suggestion.suggestion}\n```")
-                review_body = "\n".join(comment_parts)
-            
-            github_client.rest.issues.create_comment(owner=owner, repo=repo, issue_number=pr_number, body=review_body)
-            logging.info(f"Successfully posted structured review on PR #{pr_number}")
+            elif queue_name == REPLY_QUEUE_NAME:
+                if job_data["commenter_login"] != BOT_NAME:
+                    logging.info(f"Processing Comment Reply job from '{queue_name}'")
+                    handle_comment_reply(job_data, github_client)
+                else:
+                    logging.info(f"Ignoring comment from our own bot ('{BOT_NAME}') to prevent loops.")
 
         except Exception as e:
             logging.error(f"An unexpected error occurred: {e}", exc_info=True)
-            if 'job_json' in locals() and redis_client:
-                redis_client.lpush(JOB_QUEUE_NAME, job_json)
+            if 'job_json' in locals() and redis_client and 'queue_name' in locals():
+                redis_client.lpush(queue_name, job_json)
             time.sleep(5)
 
 if __name__ == "__main__":
